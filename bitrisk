@@ -1,0 +1,532 @@
+# bitcoin_risk_management.py
+# A proof-of-concept module for implementing banking-style risk management for Bitcoin
+
+import hashlib
+import time
+import math
+import json
+from typing import List, Dict, Tuple, Optional, Any
+import numpy as np
+from datetime import datetime, timedelta
+
+# This would interface with Bitcoin Core in a real implementation
+# For this POC, we'll simulate some blockchain and wallet data
+
+class BitcoinRiskManager:
+    def __init__(self, wallet_data: Dict = None, market_data: Dict = None, config: Dict = None):
+        """Initialize the risk management system with wallet and market data"""
+        self.wallet_data = wallet_data or self._get_mock_wallet_data()
+        self.market_data = market_data or self._get_mock_market_data()
+        self.config = config or {
+            "confidence_level": 0.95,  # For VaR calculations
+            "historical_window_days": 30,
+            "risk_tolerance": "medium",  # low, medium, high
+            "utxo_consolidation_threshold": 10,
+            "min_confirmations_by_risk": {
+                "low": 6,
+                "medium": 3,
+                "high": 1
+            }
+        }
+        
+    def _get_mock_wallet_data(self) -> Dict:
+        """Mock data for demonstration purposes. Would be replaced by actual wallet data"""
+        return {
+            "balance": 1.25,
+            "utxos": [
+                {"txid": "a1b2c3...", "vout": 0, "amount": 0.5, "confirmations": 120, "age_days": 45},
+                {"txid": "d4e5f6...", "vout": 1, "amount": 0.3, "confirmations": 20, "age_days": 2},
+                {"txid": "g7h8i9...", "vout": 0, "amount": 0.35, "confirmations": 6, "age_days": 0.5},
+                {"txid": "j1k2l3...", "vout": 2, "amount": 0.1, "confirmations": 1, "age_days": 0.1},
+            ],
+            "transaction_history": [
+                {"txid": "tx1", "timestamp": time.time() - 86400*30, "amount": 0.1, "fee": 0.0001},
+                {"txid": "tx2", "timestamp": time.time() - 86400*20, "amount": -0.05, "fee": 0.0002},
+                {"txid": "tx3", "timestamp": time.time() - 86400*10, "amount": 0.2, "fee": 0.0003},
+                {"txid": "tx4", "timestamp": time.time() - 86400*5, "amount": -0.15, "fee": 0.0002},
+                {"txid": "tx5", "timestamp": time.time() - 86400*1, "amount": 0.05, "fee": 0.0001},
+            ],
+            "address_book": [
+                {"address": "bc1q123...", "label": "exchange", "transactions": 12},
+                {"address": "3a1b2c3...", "label": "savings", "transactions": 3},
+                {"address": "1defgh...", "label": "merchant", "transactions": 7},
+            ]
+        }
+    
+    def _get_mock_market_data(self) -> Dict:
+        """Mock market data for demonstration. Would be replaced by actual market data"""
+        # Generate some realistic looking price data
+        today = time.time()
+        price_data = []
+        base_price = 50000
+        for i in range(90):
+            day = today - (86400 * i)
+            # Add some volatility patterns
+            noise = np.random.normal(0, 1) * 500
+            trend = -i * 20 if i < 45 else i * 15  # Create a dip and recovery
+            daily_price = base_price + noise + trend
+            price_data.append({
+                "timestamp": day,
+                "price": daily_price,
+                "volume": 2000000000 + np.random.normal(0, 1) * 500000000
+            })
+        
+        return {
+            "price_history": list(reversed(price_data)),
+            "current_price": price_data[0]["price"],
+            "fee_estimates": {
+                "fastest": 25,  # sat/vbyte
+                "half_hour": 15,
+                "hour": 10,
+                "economy": 5,
+                "minimum": 1
+            },
+            "network_stats": {
+                "mempool_size": 15000,
+                "hashrate": 240000000000000000000,
+                "difficulty": 53350035753.3,
+                "unconfirmed_txs": 12500
+            }
+        }
+    
+    def calculate_value_at_risk(self, timeframe_days: int = 1, confidence_level: Optional[float] = None) -> Dict:
+        """
+        Calculate Value at Risk for the wallet holdings
+        Adapted from traditional banking VaR models
+        """
+        if confidence_level is None:
+            confidence_level = self.config["confidence_level"]
+            
+        # Extract historical returns
+        prices = [day["price"] for day in self.market_data["price_history"]]
+        if len(prices) < 2:
+            return {"error": "Insufficient price data for VaR calculation"}
+            
+        # Calculate daily returns
+        returns = []
+        for i in range(1, len(prices)):
+            daily_return = (prices[i] - prices[i-1]) / prices[i-1]
+            returns.append(daily_return)
+            
+        # Current portfolio value in USD
+        portfolio_value = self.wallet_data["balance"] * self.market_data["current_price"]
+        
+        # Calculate VaR using historical simulation method
+        returns.sort()  # Sort returns from worst to best
+        index = int(len(returns) * (1 - confidence_level))
+        var_pct = abs(returns[index])  # Convert to positive number for easier understanding
+        
+        # Scale to timeframe
+        var_pct_scaled = var_pct * math.sqrt(timeframe_days)
+        var_amount = portfolio_value * var_pct_scaled
+        
+        return {
+            "value_at_risk_pct": var_pct_scaled,
+            "value_at_risk_usd": var_amount,
+            "value_at_risk_btc": var_amount / self.market_data["current_price"],
+            "confidence_level": confidence_level,
+            "timeframe_days": timeframe_days,
+            "portfolio_value_usd": portfolio_value,
+            "analysis": self._generate_var_analysis(var_pct_scaled, timeframe_days, confidence_level)
+        }
+    
+    def _generate_var_analysis(self, var_pct: float, timeframe_days: int, confidence_level: float) -> str:
+        """Generate a human-readable analysis of the VaR results"""
+        risk_level = "high" if var_pct > 0.1 else "medium" if var_pct > 0.05 else "low"
+        
+        return (
+            f"At {confidence_level*100}% confidence, your portfolio has a {risk_level} risk level with a "
+            f"potential loss of {var_pct*100:.2f}% over the next {timeframe_days} day(s). "
+            f"This is {'above' if risk_level == 'high' else 'within'} typical cryptocurrency volatility ranges."
+        )
+    
+    def analyze_utxo_health(self) -> Dict:
+        """
+        Analyzes the health of the wallet's UTXOs
+        Similar to liquidity analysis in banking
+        """
+        utxos = self.wallet_data["utxos"]
+        
+        # UTXO fragmentation analysis
+        fragmentation_score = 0
+        if len(utxos) > 10:
+            fragmentation_score = 0.7
+        elif len(utxos) > 5:
+            fragmentation_score = 0.3
+        
+        # UTXO age analysis (prefer a mix of older confirmed UTXOs)
+        age_score = 0
+        confirmations = [u["confirmations"] for u in utxos]
+        if min(confirmations) >= 6:
+            age_score = 1.0
+        elif min(confirmations) >= 1:
+            age_score = 0.5
+            
+        # UTXO size distribution (prefer some larger UTXOs for bigger payments)
+        amounts = [u["amount"] for u in utxos]
+        size_score = 0
+        if max(amounts) > 0.1 and min(amounts) < 0.01:
+            size_score = 1.0  # Good mix of sizes
+        elif max(amounts) > 0.1:
+            size_score = 0.7  # At least some larger UTXOs
+        
+        # Calculate overall health score
+        health_score = (fragmentation_score + age_score + size_score) / 3
+        health_category = "good" if health_score > 0.7 else "average" if health_score > 0.4 else "poor"
+        
+        # Generate recommendations
+        recommendations = []
+        if fragmentation_score > 0.5:
+            recommendations.append("Consider consolidating smaller UTXOs during low-fee periods")
+        if age_score < 0.7:
+            recommendations.append("Wait for more confirmations before making large transfers")
+        if size_score < 0.5:
+            recommendations.append("Create some larger UTXOs for future larger payments")
+            
+        return {
+            "health_score": health_score,
+            "health_category": health_category,
+            "metrics": {
+                "fragmentation": fragmentation_score,
+                "confirmation_health": age_score,
+                "size_distribution": size_score
+            },
+            "recommendations": recommendations,
+            "utxo_count": len(utxos),
+            "fully_confirmed_utxos": sum(1 for u in utxos if u["confirmations"] >= 6),
+            "total_value": sum(u["amount"] for u in utxos)
+        }
+    
+    def counterparty_risk_assessment(self, address: str) -> Dict:
+        """
+        Assess the risk associated with a specific counterparty/address
+        Adaptation of traditional banking KYC/counterparty assessment
+        """
+        # In a real implementation, this would analyze on-chain data
+        # For this POC, we'll use mock data and simulate some analysis
+        
+        # Check if address is in address book
+        address_info = None
+        for entry in self.wallet_data["address_book"]:
+            if entry["address"] == address:
+                address_info = entry
+                break
+        
+        # Default risk profile for unknown addresses
+        if not address_info:
+            return {
+                "address": address,
+                "risk_score": 0.7,  # Higher risk for unknown addresses
+                "risk_category": "elevated",
+                "recommendation": "Consider smaller initial transaction to establish trust",
+                "rationale": "No previous transaction history with this address"
+            }
+        
+        # Calculate risk metrics based on transaction history
+        risk_score = 1.0  # Start with maximum risk
+        
+        # More transactions = lower risk
+        if address_info["transactions"] > 10:
+            risk_score -= 0.4
+        elif address_info["transactions"] > 5:
+            risk_score -= 0.3
+        elif address_info["transactions"] > 2:
+            risk_score -= 0.2
+        else:
+            risk_score -= 0.1
+            
+        # Risk based on address label/type
+        if address_info["label"] == "savings":
+            risk_score -= 0.3  # Self-custody addresses are lower risk
+        elif address_info["label"] == "exchange":
+            risk_score -= 0.1  # Exchanges have some counterparty risk
+            
+        # Clamp risk score between 0 and 1
+        risk_score = max(0, min(risk_score, 1.0))
+        
+        # Categorize the risk
+        if risk_score < 0.3:
+            category = "low"
+            recommendation = "Standard transactions appropriate"
+        elif risk_score < 0.6:
+            category = "moderate"
+            recommendation = "Proceed with normal caution"
+        else:
+            category = "elevated"
+            recommendation = "Consider breaking large transfers into smaller amounts"
+            
+        return {
+            "address": address,
+            "risk_score": risk_score,
+            "risk_category": category,
+            "recommendation": recommendation,
+            "transaction_count": address_info["transactions"],
+            "address_type": address_info["label"]
+        }
+        
+    def optimal_fee_strategy(self, urgency_level: str = "medium") -> Dict:
+        """
+        Calculate optimal fee strategy based on current mempool conditions
+        Similar to cost optimization strategies in banking
+        """
+        fee_estimates = self.market_data["fee_estimates"]
+        mempool_size = self.market_data["network_stats"]["mempool_size"]
+        
+        # Define urgency levels and corresponding wait time tolerances
+        urgency_mapping = {
+            "very_high": {"max_wait_blocks": 1, "fee_multiplier": 1.1},
+            "high": {"max_wait_blocks": 2, "fee_multiplier": 1.0},
+            "medium": {"max_wait_blocks": 6, "fee_multiplier": 0.9},
+            "low": {"max_wait_blocks": 12, "fee_multiplier": 0.8},
+            "very_low": {"max_wait_blocks": 24, "fee_multiplier": 0.7}
+        }
+        
+        # Default to medium if invalid urgency level provided
+        if urgency_level not in urgency_mapping:
+            urgency_level = "medium"
+            
+        urgency_config = urgency_mapping[urgency_level]
+        
+        # Map wait blocks to fee levels
+        fee_recommendation = None
+        estimated_wait_minutes = None
+        
+        if urgency_config["max_wait_blocks"] <= 1:
+            fee_recommendation = fee_estimates["fastest"]
+            estimated_wait_minutes = "10-20"
+        elif urgency_config["max_wait_blocks"] <= 3:
+            fee_recommendation = fee_estimates["half_hour"] 
+            estimated_wait_minutes = "20-40"
+        elif urgency_config["max_wait_blocks"] <= 6:
+            fee_recommendation = fee_estimates["hour"]
+            estimated_wait_minutes = "40-60"
+        else:
+            fee_recommendation = fee_estimates["economy"]
+            estimated_wait_minutes = "60-180"
+            
+        # Apply fee multiplier based on urgency level
+        fee_recommendation = math.ceil(fee_recommendation * urgency_config["fee_multiplier"])
+        
+        # If mempool is particularly congested, adjust upward
+        if mempool_size > 20000 and urgency_level in ["very_high", "high"]:
+            fee_recommendation = math.ceil(fee_recommendation * 1.2)
+            
+        # For very_low urgency with large mempool, we might actually recommend waiting
+        wait_recommendation = None
+        if urgency_level == "very_low" and mempool_size > 15000:
+            wait_recommendation = "Consider delaying non-urgent transactions until mempool clears"
+            
+        return {
+            "recommended_fee_sat_per_vbyte": fee_recommendation,
+            "urgency_level": urgency_level,
+            "estimated_wait_minutes": estimated_wait_minutes,
+            "mempool_status": "congested" if mempool_size > 15000 else "normal",
+            "fee_market_volatility": "high" if max(fee_estimates.values()) / min(fee_estimates.values()) > 10 else "normal",
+            "wait_recommendation": wait_recommendation
+        }
+    
+    def generate_risk_dashboard(self) -> Dict:
+        """
+        Create a comprehensive risk dashboard combining multiple risk metrics
+        Similar to executive dashboards in banking risk systems
+        """
+        var = self.calculate_value_at_risk()
+        utxo_health = self.analyze_utxo_health()
+        fee_strategy = self.optimal_fee_strategy()
+        
+        # Calculate overall risk score
+        price_volatility_risk = var["value_at_risk_pct"]
+        normalized_price_risk = min(1.0, price_volatility_risk * 10)  # Scale 0-1
+        
+        utxo_risk = 1 - utxo_health["health_score"]  # Invert so higher = more risk
+        
+        fee_risk = 0.3  # Base fee risk
+        if fee_strategy["mempool_status"] == "congested":
+            fee_risk = 0.7
+            
+        # Weight the different risk components
+        overall_risk = (
+            normalized_price_risk * 0.5 + 
+            utxo_risk * 0.3 + 
+            fee_risk * 0.2
+        )
+        
+        # Generate natural language summary
+        risk_category = "high" if overall_risk > 0.7 else "medium" if overall_risk > 0.4 else "low"
+        
+        summary = f"Your Bitcoin wallet currently has {risk_category} overall risk. "
+        
+        if normalized_price_risk > 0.6:
+            summary += "Market volatility is the primary risk factor. "
+        elif utxo_risk > 0.6:
+            summary += "UTXO structure is the primary risk factor. "
+        elif fee_risk > 0.6:
+            summary += "Network fee volatility is a concern. "
+            
+        # Add recommendations
+        recommendations = []
+        if normalized_price_risk > 0.5:
+            recommendations.append("Consider hedging strategies or reducing position size")
+        if utxo_risk > 0.5:
+            recommendations.extend(utxo_health["recommendations"])
+        if fee_risk > 0.5 and fee_strategy["wait_recommendation"]:
+            recommendations.append(fee_strategy["wait_recommendation"])
+            
+        return {
+            "overall_risk_score": overall_risk,
+            "risk_category": risk_category,
+            "summary": summary,
+            "recommendations": recommendations,
+            "components": {
+                "market_risk": normalized_price_risk,
+                "utxo_risk": utxo_risk,
+                "fee_risk": fee_risk
+            },
+            "detailed_metrics": {
+                "value_at_risk": var,
+                "utxo_health": utxo_health,
+                "fee_environment": fee_strategy
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    def stress_test_portfolio(self, scenarios: List[Dict] = None) -> Dict:
+        """
+        Run stress tests on the wallet to see how it performs under extreme conditions
+        Adaptation of banking stress tests
+        """
+        if scenarios is None:
+            # Default scenarios
+            scenarios = [
+                {"name": "market_crash", "price_change": -0.4, "fee_multiplier": 3, "description": "Sudden 40% market drop with 3x fee increase"},
+                {"name": "fee_spike", "price_change": -0.05, "fee_multiplier": 10, "description": "Extreme network congestion leading to 10x fees"},
+                {"name": "extended_bear", "price_change": -0.7, "fee_multiplier": 0.5, "description": "Extended bear market with 70% decline over time"}
+            ]
+            
+        results = {}
+        portfolio_value_usd = self.wallet_data["balance"] * self.market_data["current_price"]
+        
+        for scenario in scenarios:
+            # Calculate impact on portfolio value
+            new_portfolio_value = portfolio_value_usd * (1 + scenario["price_change"])
+            
+            # Calculate impact on transaction costs
+            base_tx_fee = self.market_data["fee_estimates"]["hour"] * 225  # Assume 225 vbytes typical tx size
+            stress_tx_fee = base_tx_fee * scenario["fee_multiplier"]
+            
+            # Calculate transaction cost as percentage of portfolio
+            tx_cost_pct = (stress_tx_fee / 100000000 * self.market_data["current_price"]) / new_portfolio_value
+            
+            # Calculate liquidity impact
+            liquidity_score = 1.0  # Start with perfect liquidity
+            
+            # Severe price drops impact liquidity
+            if scenario["price_change"] < -0.3:
+                liquidity_score -= 0.4
+            elif scenario["price_change"] < -0.1:
+                liquidity_score -= 0.2
+                
+            # High fees impact liquidity
+            if scenario["fee_multiplier"] > 5:
+                liquidity_score -= 0.4
+            elif scenario["fee_multiplier"] > 2:
+                liquidity_score -= 0.2
+                
+            # Ensure score stays in valid range
+            liquidity_score = max(0, min(1.0, liquidity_score))
+            
+            # Generate recommendations
+            recommendations = []
+            if scenario["price_change"] < -0.3:
+                recommendations.append("Consider setting aside funds for portfolio rebalancing opportunities")
+            if scenario["fee_multiplier"] > 3:
+                recommendations.append("Maintain some larger UTXOs to minimize fee percentage on large transfers")
+            if liquidity_score < 0.5:
+                recommendations.append("Develop contingency plans for periods of reduced liquidity")
+                
+            results[scenario["name"]] = {
+                "description": scenario["description"],
+                "new_portfolio_value_usd": new_portfolio_value,
+                "value_change_usd": new_portfolio_value - portfolio_value_usd,
+                "stress_tx_fee_sats": stress_tx_fee,
+                "tx_cost_percentage": tx_cost_pct * 100,
+                "liquidity_score": liquidity_score,
+                "liquidity_category": "high" if liquidity_score > 0.7 else "medium" if liquidity_score > 0.4 else "low",
+                "recommendations": recommendations
+            }
+            
+        return {
+            "current_portfolio_value_usd": portfolio_value_usd,
+            "scenarios": results,
+            "most_severe_scenario": min(scenarios, key=lambda x: results[x["name"]]["new_portfolio_value_usd"])["name"],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    def generate_detailed_report(self) -> Dict:
+        """Generate a comprehensive risk report combining all analyses"""
+        dashboard = self.generate_risk_dashboard()
+        stress_test = self.stress_test_portfolio()
+        
+        # Additional historical analysis
+        price_volatility = self._calculate_historical_volatility()
+        
+        return {
+            "summary": dashboard["summary"],
+            "overall_risk_assessment": dashboard,
+            "stress_test_results": stress_test,
+            "historical_volatility": price_volatility,
+            "recommendations": dashboard["recommendations"],
+            "report_generated": datetime.now().isoformat(),
+            "data_timestamp": datetime.now().isoformat()
+        }
+        
+    def _calculate_historical_volatility(self) -> Dict:
+        """Calculate historical price volatility metrics"""
+        prices = [day["price"] for day in self.market_data["price_history"]]
+        returns = []
+        
+        for i in range(1, len(prices)):
+            daily_return = (prices[i] - prices[i-1]) / prices[i-1]
+            returns.append(daily_return)
+            
+        # Calculate various volatility metrics
+        daily_volatility = np.std(returns)
+        annualized_volatility = daily_volatility * math.sqrt(365)
+        
+        # Calculate max drawdown
+        max_drawdown = 0
+        peak = prices[0]
+        
+        for price in prices:
+            if price > peak:
+                peak = price
+            drawdown = (peak - price) / peak
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+                
+        return {
+            "daily_volatility": daily_volatility,
+            "annualized_volatility": annualized_volatility,
+            "max_drawdown": max_drawdown,
+            "volatility_percentile": 0.65,  # Would compare to historical ranges in real implementation
+            "data_points": len(prices),
+            "assessment": "Bitcoin's current volatility is within average historical ranges" 
+            if annualized_volatility < 0.8 else "Bitcoin is experiencing above-average volatility"
+        }
+
+# Example usage
+if __name__ == "__main__":
+    # Initialize the risk manager
+    risk_manager = BitcoinRiskManager()
+    
+    # Generate dashboard
+    dashboard = risk_manager.generate_risk_dashboard()
+    print(json.dumps(dashboard, indent=2))
+    
+    # Get fee recommendation
+    fee_strategy = risk_manager.optimal_fee_strategy(urgency_level="high")
+    print(json.dumps(fee_strategy, indent=2))
+    
+    # Run stress test
+    stress_test = risk_manager.stress_test_portfolio()
+    print(json.dumps(stress_test, indent=2))
